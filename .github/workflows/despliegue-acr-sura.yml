@@ -11,8 +11,12 @@ env:
   REGISTRY: crsuradev.azurecr.io
   IMAGE_NAME: backend-tasks-api-v2
   IMAGE_TAG: sura.v1
+
   AZURE_TENANT_ID: 9dbc76ea-fb25-4b07-8f07-5dc315999b76
   AZURE_SUBSCRIPTION_ID: f0550323-fb0b-44d4-8a39-ecf0f6c2dbc9
+
+  AKS_RESOURCE_GROUP: RG-PRY-SURA-PLF-ENGINEERING
+  AKS_CLUSTER_NAME: aks-sura-dev
 
 jobs:
   build-and-push:
@@ -70,9 +74,6 @@ jobs:
       - name: Validate Previous Image
         run: |
           echo "===== PREVIOUS IMAGE VALIDATION ====="
-          echo "Repository: $IMAGE_NAME"
-          echo "Tag to validate: $IMAGE_TAG"
-          echo "Full image: $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
 
           PREVIOUS_DIGEST=$(az acr manifest list-metadata \
             --registry "$ACR_NAME" \
@@ -87,18 +88,11 @@ jobs:
             -o tsv 2>/dev/null || true)
 
           if [ -n "$PREVIOUS_DIGEST" ]; then
-            echo "Previous image found."
-            echo "Previous image: $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
-            echo "Previous digest: $PREVIOUS_DIGEST"
-            echo "Previous updated time: ${PREVIOUS_UPDATED_TIME:-N/A}"
-
             echo "PREVIOUS_IMAGE_STATUS=FOUND" >> "$GITHUB_ENV"
             echo "PREVIOUS_IMAGE=$REGISTRY/$IMAGE_NAME:$IMAGE_TAG" >> "$GITHUB_ENV"
             echo "PREVIOUS_DIGEST=$PREVIOUS_DIGEST" >> "$GITHUB_ENV"
             echo "PREVIOUS_UPDATED_TIME=${PREVIOUS_UPDATED_TIME:-N/A}" >> "$GITHUB_ENV"
           else
-            echo "No previous image found with tag $IMAGE_TAG."
-
             echo "PREVIOUS_IMAGE_STATUS=NOT_FOUND" >> "$GITHUB_ENV"
             echo "PREVIOUS_IMAGE=$REGISTRY/$IMAGE_NAME:$IMAGE_TAG" >> "$GITHUB_ENV"
             echo "PREVIOUS_DIGEST=N/A" >> "$GITHUB_ENV"
@@ -108,11 +102,6 @@ jobs:
       - name: Build Docker Image
         run: |
           echo "===== BUILDING IMAGE ====="
-          echo "Image: $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
-          echo "Push creator: $GITHUB_ACTOR"
-          echo "Triggering actor: $GITHUB_TRIGGERING_ACTOR"
-          echo "Branch: $GITHUB_REF_NAME"
-          echo "Commit SHA: $GITHUB_SHA"
 
           docker build \
             --label org.opencontainers.image.authors="$GITHUB_ACTOR" \
@@ -127,9 +116,6 @@ jobs:
       - name: Push Docker Image
         run: |
           echo "===== PUSHING IMAGE ====="
-          echo "Pushing image: $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
-          echo "Push creator: $GITHUB_ACTOR"
-
           docker push "$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
 
       - name: Validate New Image
@@ -148,52 +134,71 @@ jobs:
             --query "[?tags && contains(tags, '$IMAGE_TAG')].lastUpdateTime | [0]" \
             -o tsv)
 
-          echo "New image: $REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
-          echo "New digest: $NEW_DIGEST"
-          echo "New updated time: $NEW_UPDATED_TIME"
-
           echo "NEW_IMAGE=$REGISTRY/$IMAGE_NAME:$IMAGE_TAG" >> "$GITHUB_ENV"
           echo "NEW_DIGEST=$NEW_DIGEST" >> "$GITHUB_ENV"
           echo "NEW_UPDATED_TIME=$NEW_UPDATED_TIME" >> "$GITHUB_ENV"
 
-      - name: Summary
+  create-namespace:
+    name: Create Namespace in AKS
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Azure Login
+        run: |
+          az login --service-principal \
+            --username "${{ secrets.AZURE_CLIENT_ID }}" \
+            --password "${{ secrets.AZURE_CLIENT_SECRET }}" \
+            --tenant "$AZURE_TENANT_ID"
+
+      - name: Select Subscription
+        run: |
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+
+      - name: Connect to AKS
+        run: |
+          az aks get-credentials \
+            --resource-group "$AKS_RESOURCE_GROUP" \
+            --name "$AKS_CLUSTER_NAME" \
+            --overwrite-existing
+
+      - name: Generate Namespace Name
+        run: |
+          REPOSITORY_NAME=$(basename "$GITHUB_REPOSITORY")
+          NAMESPACE=$(echo "$REPOSITORY_NAME" | tr '[:upper:]' '[:lower:]')
+
+          echo "Repository: $REPOSITORY_NAME"
+          echo "Namespace: $NAMESPACE"
+
+          echo "NAMESPACE=$NAMESPACE" >> "$GITHUB_ENV"
+
+      - name: Create Namespace If Not Exists
+        run: |
+          kubectl create namespace "$NAMESPACE" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Validate Namespace
+        run: |
+          echo "===== NAMESPACE VALIDATION ====="
+          kubectl get namespace "$NAMESPACE"
+
+      - name: Namespace Summary
         run: |
           echo "========================================="
-          echo "Docker Image Publish Summary"
+          echo "AKS Namespace Summary"
           echo "========================================="
-          echo "Previous image status: $PREVIOUS_IMAGE_STATUS"
-          echo "Previous image: $PREVIOUS_IMAGE"
-          echo "Previous digest: $PREVIOUS_DIGEST"
-          echo "Previous updated time: $PREVIOUS_UPDATED_TIME"
-          echo "========================================="
-          echo "New published image: $NEW_IMAGE"
-          echo "New digest: $NEW_DIGEST"
-          echo "New updated time: $NEW_UPDATED_TIME"
-          echo "Image tag: $IMAGE_TAG"
-          echo "Push creator: $GITHUB_ACTOR"
-          echo "Triggering actor: $GITHUB_TRIGGERING_ACTOR"
-          echo "Commit SHA: $GITHUB_SHA"
-          echo "Branch: $GITHUB_REF_NAME"
+          echo "Cluster: $AKS_CLUSTER_NAME"
+          echo "Namespace: $NAMESPACE"
+          echo "Repository: $GITHUB_REPOSITORY"
           echo "========================================="
 
           {
-            echo "## Docker Image Publish Summary"
+            echo "## AKS Namespace Summary"
             echo ""
-            echo "### Previous image"
-            echo ""
-            echo "- Status: \`$PREVIOUS_IMAGE_STATUS\`"
-            echo "- Image: \`$PREVIOUS_IMAGE\`"
-            echo "- Previous digest: \`$PREVIOUS_DIGEST\`"
-            echo "- Previous updated time: \`$PREVIOUS_UPDATED_TIME\`"
-            echo ""
-            echo "### New published image"
-            echo ""
-            echo "- Image: \`$NEW_IMAGE\`"
-            echo "- Tag: \`$IMAGE_TAG\`"
-            echo "- New digest: \`$NEW_DIGEST\`"
-            echo "- New updated time: \`$NEW_UPDATED_TIME\`"
-            echo "- Push creator: \`$GITHUB_ACTOR\`"
-            echo "- Triggering actor: \`$GITHUB_TRIGGERING_ACTOR\`"
-            echo "- Commit SHA: \`$GITHUB_SHA\`"
-            echo "- Branch: \`$GITHUB_REF_NAME\`"
+            echo "- Cluster: \`$AKS_CLUSTER_NAME\`"
+            echo "- Namespace: \`$NAMESPACE\`"
+            echo "- Repository: \`$GITHUB_REPOSITORY\`"
           } >> "$GITHUB_STEP_SUMMARY"
